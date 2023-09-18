@@ -17,7 +17,7 @@
 
 
 
-**SagaStep 인터페이스 정의**<br>
+#### **SagaStep 인터페이스 정의**<br>
 
 그런 다음 com.food.ordering.system 패키지를 saga 모듈 내의 /src/main/java 에 만듭니다. 그리고 `SagaStep` 라는 이름으로 `interface` 를 추가합니다.
 
@@ -52,7 +52,9 @@ public interface SagaStep<T, S extends DomainEvent, U extends DomainEvent> {
 
 
 
-**Void 타입의 반환**<br>
+##### EmptyEvent 구현, Void 타입의 반환
+
+**`Void` 타입의 반환**
 
 SagaStep 의 메서드 들인 porcess(T data), rollback(T data) 를 자세히 보면 각 SAGA 단계는 T 타입을 처리하고 DomainEvent 를 반환한다. 그런데 일부 SAGA Step 에서는 종료 작업일 경우 이벤트를 실행할 필요가 없는 경우가 있다. 
 
@@ -128,7 +130,7 @@ public final class EmptyEvent implements DomainEvent<Void> {
 
 
 
-**SAGA Step 을 왜 `:order-service:order-domain:order-application-service` 모듈 내에 정의할까?**
+#### **SAGA Step 을 왜 `:order-service:order-domain:order-application-service` 모듈 내에 정의할까?**
 
 좋습니다. 이제 `:order-service:order-domain:order-application-service` 모듈 내에 첫번째 SAGA Step 을 만들어보겠습니다. 
 
@@ -140,28 +142,217 @@ public final class EmptyEvent implements DomainEvent<Void> {
 
 
 
-**OrderPaymentSaga 구현**
+#### **OrderPaymentSaga 구현**
 
 그래서 `:order-service:order-domain:order-application-service` 모듈 내에  OrderPaymentSaga 라는 새 클래스를 만들겠습니다. @Slf4j, @Component 어노테이션을 추가해줬습니다. @Component 어노테이션을 사용함으로써 `OrderPaymentSaga` 를 스프링 매니지드 빈으로 선언했습니다.
 
-결제 레스토랑 메시지 리스너 입력 클래스는 입력 부분 결제 응답 메시지 리스너를 구현한다는 점을 기억하세요. 그리고 주문 메시징 모듈에서는 결제 응답 Kafka 리스너 클래스의 결제 응답 메시지 리스너 인터페이스를 사용합니다.
 
-이 클래스에는 Kafka 리스너 주석이 포함된 수신 메서드가 있으므로 실제로 Kafka 소비자를 생성 및 사용하고 결제 응답 Kafka 주제에서 데이터를 가져온 다음 이 결제 응답 메시지 리스너 인터페이스를 사용하여 모든 복제 서비스로 보냅니다.
 
-그런 다음 결제 응답 메시지 리스너 입력 클래스에서 주문 결제 사가를 사용하여 작업을 처리하거나 롤백합니다.
-먼저 주문 결제 사가 구현을 마치고 여기로 돌아와 결제 응답 메시지 리스너 입력 클래스를 수행하고 주문 결제 사가 개체를 사용하여 사가 작업을 처리하거나 롤백하겠습니다.
+#### process(), rollback() 구현
 
-이제 주문 결제 Saga 클래스에서 매개변수 T를 대체하는 데이터 유형에 대한 Saga 단계 인터페이스를 구현하겠습니다.
+```java
+package com.food.ordering.system.order.service.domain;
 
-이 단계는 결제 서비스에서 응답을 받은 후 호출되므로 결제 응답을 사용하겠습니다.
+// ..
 
-결제 응답 모델을 데이터 유형으로 설정한 후, 결제가 완료되면 주문 서비스에서 결제 완료 이벤트를 받고 주문 결제 사가는 다음 단계인 레스토랑을 진행해야 하기 때문에 처리 방법의 반환 유형을 주문 결제로 설정하겠습니다. 승인.
+@Slf4j
+@Component
+public class OrderPaymentSaga implements SagaStep<PaymentResponse, OrderPaidEvent, EmptyEvent> {
 
-레스토랑 승인 요청은 주문 결제 이벤트와 함께 실행되어야 한다는 점을 기억하세요. 그래서 여기서는 처리 방식의 반환 유형을 주문 결제 이벤트로 설정했습니다.
+    private final OrderDomainService orderDomainService;
+    private final OrderRepository orderRepository;
+    private final OrderPaidRestaurantRequestMessagePublisher orderPaidRestaurantRequestMessagePublisher;
 
-롤백 방법의 경우 결제가 실패하면 서비스 로컬 데이터베이스 작업을 주문하기 위해 롤백하면 되기 때문에 빈 이벤트만 설정하고 이전 단계가 없기 때문에 법의 이야기가 중지됩니다. 주문 결제 단계.
+    public OrderPaymentSaga(OrderDomainService orderDomainService,
+                            OrderRepository orderRepository,
+                            OrderPaidRestaurantRequestMessagePublisher orderPaidRestaurantRequestMessagePublisher) {
+        this.orderDomainService = orderDomainService;
+        this.orderRepository = orderRepository;
+        this.orderPaidRestaurantRequestMessagePublisher = orderPaidRestaurantRequestMessagePublisher;
+    }
 
-좋습니다. 모두 이러한 일반 유형을 사용하여 프로세스 및 롤백 메서드를 작성해 보겠습니다. 또한 데이터베이스 트랜잭션을 생성하고 이러한 메서드의 변경 사항을 커밋하려고 하기 때문에 두 메서드 모두에 트랜잭션 주석을 넣었습니다.
+    @Override
+    @Transactional
+    public OrderPaidEvent process(PaymentResponse paymentResponse) {
+        log.info("Completing payment for order with id: {}", paymentResponse.getOrderId());
+        Order order = findOrder(paymentResponse.getOrderId());
+        OrderPaidEvent domainEvent = orderDomainService.payOrder(order, orderPaidRestaurantRequestMessagePublisher);
+        orderRepository.save(order);
+        log.info("Order with id: {} is paid", order.getId().getValue());
+        return domainEvent;
+    }
+
+    @Override
+    @Transactional
+    public EmptyEvent rollback(PaymentResponse paymentResponse) {
+        log.info("Cancelling order with id: {}", paymentResponse.getOrderId());
+        Order order = findOrder(paymentResponse.getOrderId());
+        orderDomainService.cancelOrder(order, paymentResponse.getFailureMessages());
+        orderRepository.save(order);
+        log.info("Order with id: {} is cancelled", order.getId().getValue());
+        return EmptyEvent.INSTANCE;
+    }
+
+    private Order findOrder(String orderId) {
+        Optional<Order> orderResponse = orderRepository.findById(new OrderId(UUID.fromString(orderId)));
+        if (orderResponse.isEmpty()) {
+            log.error("Order with id: {} could not be found!", orderId);
+            throw new OrderNotFoundException("Order with id " + orderId + " could not be found!");
+        }
+        return orderResponse.get();
+    }
+}
+
+```
+
+<br>
+
+
+
+이제 주문 결제 Saga 클래스에서 매개변수 T를 제너릭 파라미터로 받는 `SagaStep<T>`  인터페이스를 구현하겠습니다.
+
+`OrderPaymentSaga` 라는 SagaStep 은 Payment Service 에서 응답을 받은 후 호출되기에  PaymentResponse 를 타입 T로 사용하겠습니다. return 타입에 대한 타입은 
+
+PaymentResponseModel 을 `PaymentRespone` 로 설정하고 결제가 완료되면 `OrderPaidEvent` 를 `OrderPaymentSaga` 에서 정의한 `U` 타입역할을 하도록 정해줍니다. (쉽게 설명하면 OrderPaymentSaga 의 입력 이벤트는 PaymentResponse 이고 출력이벤트는 OrderPaidEvent 로 정의하겠다는 의미)<br>
+
+<img src="./img/lec63/1.png"/>
+
+
+
+Restaurant Approval 요청은 Order Paid 이벤트에 대해서만 trigger 된다는 사실을 기억하세요. 그래서 여기서는 process 메서드의 반환타입을 Order Paid 이벤트로 설정했습니다. 
+
+rollback 메서드의 경우 EmptyEvent 로 세팅하겠습니다. 왜냐하면 Payment 가 성공하지 못했을 경우일 때  이때는 그저 Order Service를 Rollback 하는 것만 필요하다. 
+
+좋습니다. 모두 이러한 일반 유형을 사용하여 프로세스 및 롤백 메서드를 작성해 보겠습니다. 또한 데이터베이스 트랜잭션을 생성하고 이러한 메서드의 변경 사항을 커밋하려고 하기 때문에 두 메서드 모두에 `@Transactional` 을 넣었습니다.
+
+<br>
+
+
+
+#### **7분 20초에서부터 다시.**
+
+그런 다음 `PaymentResponseMessageListener` 입력 클래스에서 Payment Order 사가를 사용하여 작업을 처리하거나 롤백합니다.
+
+잠시 이동을 해야 해서 정리한 부분까지만 커밋 & 푸시
+
+<br>
+
+
+
+#### PaymentResponseMessageListener, RestaurantResponseMessageListener
+
+PaymentResponseMessageListener, RestaurantResponseMessageListener 입력 클래스는 `com.food.ordering.system.order.service.domain.ports.input` 부분에 정의해둔 `PaymentResponseMessageListener` 인터페이스를 구현한다는 점을 기억하세요. 
+
+e.g. PaymentResponseMessageListenerImpl.java
+
+```java
+package com.food.ordering.system.order.service.domain;
+
+// ...
+
+@Slf4j
+@Validated
+@Service
+public class PaymentResponseMessageListenerImpl implements PaymentResponseMessageListener { // 1)
+
+  private final OrderPaymentSaga orderPaymentSaga;
+
+  // ...
+  
+  @Override
+  public void paymentCompleted(PaymentResponse paymentResponse) {
+    OrderPaidEvent domainEvent = orderPaymentSaga.process(paymentResponse);
+    log.info("Publishing OrderPaidEvent for order id: {}", paymentResponse.getOrderId());
+    domainEvent.fire();
+  }
+
+  @Override
+  public void paymentCancelled(PaymentResponse paymentResponse) {
+    orderPaymentSaga.rollback(paymentResponse);
+    log.info("Order is roll backed for order id: {} with failure messages: {}",
+             paymentResponse.getOrderId(),
+             String.join(FAILURE_MESSAGE_DELIMITER, paymentResponse.getFailureMessages()));
+  }
+}
+
+```
+
+
+
+- `1)` 
+  - `PaymentResponseMessageListener` 를 implements 하고 있다.
+
+<br>
+
+그리고 `order-messaging` 모듈에서는 `PaymentResponseMessageListener` 인터페이스를 @KafkaListener 가 적용된 메서드 내에서 사용합니다.
+
+`:order-service:order-messaging/src/main/java/com.food.ordering.system.order.service.messaging.listener.kafka/PaymentResponseKafkaListener.java`
+
+```java
+package com.food.ordering.system.order.service.messaging.listener.kafka;
+
+// ...
+
+@Slf4j
+@Component
+public class PaymentResponseKafkaListener implements KafkaConsumer<PaymentResponseAvroModel> {
+
+    private final PaymentResponseMessageListener paymentResponseMessageListener;
+    private final OrderMessagingDataMapper orderMessagingDataMapper;
+
+    public PaymentResponseKafkaListener(PaymentResponseMessageListener paymentResponseMessageListener,
+                                        OrderMessagingDataMapper orderMessagingDataMapper) {
+        this.paymentResponseMessageListener = paymentResponseMessageListener;
+        this.orderMessagingDataMapper = orderMessagingDataMapper;
+    }
+
+    @Override
+    @KafkaListener(id = "${kafka-consumer-config.payment-consumer-group-id}", topics = "${order-service.payment-response-topic-name}")
+    public void receive(@Payload List<PaymentResponseAvroModel> messages,
+                        @Header(KafkaHeaders.RECEIVED_MESSAGE_KEY) List<String> keys,
+                        @Header(KafkaHeaders.RECEIVED_PARTITION_ID) List<Integer> partitions,
+                        @Header(KafkaHeaders.OFFSET) List<Long> offsets) {
+        log.info("{} number of payment responses received with keys:{}, partitions:{} and offsets: {}",
+                messages.size(),
+                keys.toString(),
+                partitions.toString(),
+                offsets.toString());
+
+        messages.forEach(paymentResponseAvroModel -> {
+            if (PaymentStatus.COMPLETED == paymentResponseAvroModel.getPaymentStatus()) {
+                log.info("Processing successful payment for order id: {}", paymentResponseAvroModel.getOrderId());
+                paymentResponseMessageListener.paymentCompleted(orderMessagingDataMapper
+                        .paymentResponseAvroModelToPaymentResponse(paymentResponseAvroModel));
+            } else if (PaymentStatus.CANCELLED == paymentResponseAvroModel.getPaymentStatus() ||
+                    PaymentStatus.FAILED == paymentResponseAvroModel.getPaymentStatus()) {
+                log.info("Processing unsuccessful payment for order id: {}", paymentResponseAvroModel.getOrderId());
+                paymentResponseMessageListener.paymentCancelled(orderMessagingDataMapper
+                        .paymentResponseAvroModelToPaymentResponse(paymentResponseAvroModel));
+            }
+        });
+    }
+}
+```
+
+
+
+이 클래스에는 `@KafkaListener`가 적용된 `receive()` 메서드가 있으므로 실제로 Kafka 소비자를 생성 및 사용하고 PaymentResponse Kafka 토픽(`${order-service.payment-response-topic-name}`)에서 데이터를 가져온 다음 이 `PaymentResponseMessageListener`인터페이스를 사용하여 모든 replication 으로 보냅니다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 그리고 앞서 언급한 대로 결제 응답 메시지 리스너 입력이 될 도메인 이벤트를 호출자에게 반환하면 간단히 이벤트가 시작됩니다.
 
